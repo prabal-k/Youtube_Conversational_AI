@@ -22,6 +22,8 @@ from langchain_community.document_loaders import YoutubeLoader # Load the Youtub
 from langchain_community.document_loaders.youtube import TranscriptFormat # To Get transcripts as timestamped chunks
 from langchain.chains.query_constructor.schema import AttributeInfo
 from langchain.retrievers.self_query.base import SelfQueryRetriever
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
 from dotenv import load_dotenv  #Load environemnt variables from .env
 load_dotenv()
 # Create a Unique Id for each user conversation
@@ -32,37 +34,101 @@ def main():
     @st.cache_resource
     def init_components():
         embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2") #Load the hf Embedding model
-        llm = ChatGroq(temperature=0.4, model_name='Qwen-Qwq-32b',max_tokens=650) #Initialize the llm
+        llm = ChatGroq(temperature=0.4, model_name='Qwen-Qwq-32b',max_tokens=3000) #Initialize the llm
         search = DuckDuckGoSearchRun()  #Duckducksearch
         return embedding_model, llm, search
+    
+    # --- Sidebar Configuration ---
+    with st.sidebar:
+        st.header("YouTube Video Configuration")
+        
+        # YouTube URL input
+        youtube_url = st.text_input(
+            "Enter YouTube Video URL:",
+            placeholder="https://www.youtube.com/watch?v=...",
+            help="Paste the full YouTube video URL here"
+        )
+        
+        # Language selection
+        video_language = st.selectbox(
+            "Select Video Language:",
+            options=['en', 'hi'],
+            index=0,
+            help="Select the primary language of the video"
+        )
+        
+        st.markdown("---")
+        st.caption("Note: Changing these settings will reload the video transcript")
 
     # --- Create or Load Vectorstore ---
     @st.cache_resource
-    def get_vectorstore(_embedding_model):
-        persist_dir = "chroma_index" #Location to store embedding 
+    def get_vectorstore(_embedding_model, youtube_url=None, video_language='en'):
+        if youtube_url:
+            video_id = youtube_url.split("v=")[-1].split("&")[0]
+        else:
+            video_id = "default"
+
+        persist_dir = f"chroma_index/{video_id}"  # Use unique folder per video
 
         if os.path.exists(persist_dir):
             return Chroma(persist_directory=persist_dir, embedding_function=_embedding_model)
         else:
-            try:
-                loader = YoutubeLoader.from_youtube_url(
-                    "https://www.youtube.com/watch?v=J5_-l7WIO_w&list=PLKnIA16_RmvaTbihpo4MtzVm4XOQa0ER0&index=17",
-                    language=["hi"],
-                    translation="en",
-                    transcript_format=TranscriptFormat.CHUNKS,
-                    chunk_size_seconds=60,
-                )
-                docs = loader.load()
+            docs = []
+            if youtube_url:
+                try:
+                    # Validate YouTube URL format
+                    if not youtube_url.startswith(('https://www.youtube.com/', 'http://www.youtube.com/')):
+                        st.sidebar.error("Please enter a valid YouTube URL")
+                        return None
+                    
+                    loader = YoutubeLoader.from_youtube_url(
+                        youtube_url,
+                        language=[video_language],
+                        translation="en",
+                        transcript_format=TranscriptFormat.CHUNKS,
+                        chunk_size_seconds=60,
+                    )
+                    docs = loader.load()
+                    
+                    if len(docs) == 1:  # If only one chunk was returned
+                        text_splitter = RecursiveCharacterTextSplitter(
+                            chunk_size=1200,  # Adjust based on your needs
+                            chunk_overlap=120,
+                            length_function=len
+                        )
+                        docs = text_splitter.split_documents(docs)
 
-                if docs:
-                    st.write(f"Successfully loaded {len(docs)} transcript chunks")
-                else:
-                    st.write("No transcript data was loaded (empty result)")
+                    if docs:
+                        st.sidebar.success(f"Successfully loaded {len(docs)} transcript chunks")
+                    else:
+                        st.sidebar.warning("No transcript data was loaded (empty result)")
+                        return None
 
-            except Exception as e:
-                st.write(f"Error loading YouTube transcript: {str(e)}")  
-            vectorstore = Chroma.from_documents(documents=docs, embedding=_embedding_model, persist_directory=persist_dir) #Create a vector embeddings
-            # vectorstore.persist() #Save the vector store
+                except Exception as e:
+                    st.sidebar.error(f"Error loading YouTube transcript: {str(e)}")
+                    return None
+            
+            if not docs:
+                st.sidebar.warning("No YouTube URL provided or loading failed - using default video")
+                try:
+                    loader = YoutubeLoader.from_youtube_url(
+                        "https://www.youtube.com/watch?v=J5_-l7WIO_w&list=PLKnIA16_RmvaTbihpo4MtzVm4XOQa0ER0&index=17",
+                        language=[video_language],
+                        translation="en",
+                        transcript_format=TranscriptFormat.CHUNKS,
+                        chunk_size_seconds=60,
+                    )
+                    docs = loader.load()
+                except Exception as e:
+                    # st.error(f"Failed to load default video: {str(e)}")
+                    st.error(f"Failed to load default video. Please re-check and enter the URL and the Video language")
+                    return None
+
+            vectorstore = Chroma.from_documents(
+                documents=docs, 
+                embedding=_embedding_model, 
+                persist_directory=persist_dir
+            )
             return vectorstore
         
     @st.cache_resource
@@ -87,7 +153,7 @@ def main():
         # First get the base retriever from your vectorstore with increased k
         base_vectorstore_retriever = _vectorstore.as_retriever(
             # search_type = "mmr",
-            search_kwargs={"k": 12,'lambda_mult':0.5}  # Increase this number as needed
+            search_kwargs={"k": 10,'lambda_mult':0.5}  # Increase this number as needed
         )
         document_content_description = "Transcript of a youtube video"
         retriever = SelfQueryRetriever.from_llm(
@@ -97,35 +163,31 @@ def main():
             metadata_field_info,
             base_retriever = base_vectorstore_retriever,
             verbose=True,
-            search_kwargs={"k": 12}  # Increase this number as needed
+            search_kwargs={"k": 10}  # Increase this number as needed
         )
         return retriever
    
         
     # --- Initialize the components i.e llm,embedding model ,vectorstore ---
     embedding_model, model, search = init_components() 
-    vectorstore = get_vectorstore(embedding_model)
-    retriever = create_retriever(model,vectorstore)
+    vectorstore = get_vectorstore(embedding_model,youtube_url,video_language)
 
-         # --- RAG Chain Response ---
-    # def get_rag_response(query):
-    #     result = retriever.invoke(query)
-    #     return result
-
+    if vectorstore is None:
+        st.error("Failed to initialize vector store. Please check the YouTube URL and try again.")
+        return
     
+    retriever = create_retriever(model,vectorstore)
 
     # Tool A. VectorStore Retriever tool (Convert the rag_chain into a tool)
     @tool
     def retrieve_vectorstore_tool(query: str) -> str:
-        """Use this tool when the user ask about:
+        """Use this tool without further thinking when the user ask about:
     - content of the youtube video
     - Any queries specifically about the youtube video 
-    - If the user query involves providing summary , or about specific time stamp ,blog etc
+    - If the user query involves providing summary , or about specific time stamp ,generating blog etc
     Input should be the exact search query.
     The tool will perform a vectorstore search using retriever."""
         return retriever.invoke(query)
-        
-        
 
     #DuckDuckSeach Tool
     @tool
@@ -196,8 +258,7 @@ def main():
             {"role": "assistant", "content": "Hello! I'm your YouTube Assistant. Ask me content about the youtube video."}
         ]
 
-    st.title("HR Policy Chatbot")
-    st.caption("Ask about company policies or general knowledge")
+    st.title("Youtube ChatAssistant")
 
     # display enitire chat messages
     for message in st.session_state.messages:
