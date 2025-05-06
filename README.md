@@ -1,6 +1,6 @@
 # Youtube AI Assistant
 
-**Retrieval-Augmented Generation (RAG)** system that answers HR-related questions using a custom knowledge base and falls back to web search when questions fall outside of the dataset. Built with **Python**, **Streamlit**, **LangChain**,**LangGraph**, **Groq API**, and **Chroma vector store**.
+lets users upload YouTube URLs and instantly chat with the video's content. Under the hood, it uses a RAG (Retrieval-Augmented Generation) pipeline enhanced with LangGraph memory, ensuring smooth, context-aware conversations across past few interactions. Whether summarizing videos or answering questions, the system keeps track of the discussion for a seamless experience.
 
 ---
 ## Prerequisites
