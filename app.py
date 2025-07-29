@@ -1,13 +1,10 @@
 import os
 import streamlit as st   #For the User Interface
-st.set_page_config(page_title="HR Policy Chatbot", page_icon="💬", layout="centered")
+st.set_page_config(page_title="Youtube Chatbot", page_icon="💬", layout="centered")
 from langchain_huggingface import HuggingFaceEmbeddings # Load the  embedding model from huggingface
 from langchain_chroma import Chroma #Vectorstore to store the embedded vectors
 from langchain_community.document_loaders.csv_loader import CSVLoader #To load the csv file (data containing companys faq)
 from langchain_community.tools import DuckDuckGoSearchRun #Search user queries Online
-from langchain.prompts import PromptTemplate #Create a template
-from langchain.chains.combine_documents import create_stuff_documents_chain #form a final prompt with 'context' and ;query'
-from langchain.chains import create_retrieval_chain # "Combines a retriever (to fetch docs) with the 'create_stuff_document_chain' to automate end-to-end retrieval + answering."
 from langchain_groq import ChatGroq  #Load the open source Groq Models
 from langgraph.graph import StateGraph, START, END #Define the State for langgraph
 from langgraph.prebuilt import ToolNode,tools_condition #specialized node designed to execute tools within our workflow.
@@ -18,11 +15,17 @@ from langchain_core.tools import tool
 from langchain_core.messages import trim_messages # Trim the message and keep past 2 conversation
 from langgraph.checkpoint.memory import MemorySaver #Implement langgraph memory
 from langchain_core.messages import HumanMessage, AIMessage
-from langchain_community.document_loaders import YoutubeLoader # Load the Youtube Transcript
-from langchain_community.document_loaders.youtube import TranscriptFormat # To Get transcripts as timestamped chunks
+from youtube_transcript_api import YouTubeTranscriptApi
 from langchain.chains.query_constructor.schema import AttributeInfo
 from langchain.retrievers.self_query.base import SelfQueryRetriever
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
+from collections import defaultdict
+from datetime import timedelta
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+
 
 from dotenv import load_dotenv  #Load environemnt variables from .env
 load_dotenv()
@@ -33,8 +36,9 @@ def main():
     # --- Initialize Components such as llm ,embedding model and DuckDUCKSearch ---
     @st.cache_resource
     def init_components():
-        embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2") #Load the hf Embedding model
-        llm = ChatGroq(temperature=0.4, model_name='Qwen-Qwq-32b',max_tokens=3000) #Initialize the llm
+        embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-mpnet-base-v2") #Load the hf Embedding model
+        llm = ChatGroq(temperature=0.4, model_name='Llama-3.3-70b-versatile',max_tokens=3000) #Initialize the llm
+        # llm = ChatOpenAI(model='gpt-4o-mini')
         search = DuckDuckGoSearchRun()  #Duckducksearch
         return embedding_model, llm, search
     
@@ -60,8 +64,10 @@ def main():
         st.markdown("---")
         st.caption("Note: Changing these settings will reload the video transcript")
 
+        st.write(youtube_url , video_language)
+
     # --- Create or Load Vectorstore ---
-    @st.cache_resource
+    # @st.cache_resource
     def get_vectorstore(_embedding_model, youtube_url=None, video_language='en'):
         if youtube_url:
             video_id = youtube_url.split("v=")[-1].split("&")[0]
@@ -69,91 +75,82 @@ def main():
             video_id = "default"
 
         persist_dir = f"chroma_index/{video_id}"  # Use unique folder per video
+        vectorstore = Chroma(collection_name = video_id,
+            embedding_function=_embedding_model)
 
         if os.path.exists(persist_dir):
             return Chroma(persist_directory=persist_dir, embedding_function=_embedding_model)
         else:
             docs = []
+            documents = []
             if youtube_url:
                 try:
-                    # Validate YouTube URL format
-                    if not youtube_url.startswith(('https://www.youtube.com/', 'http://www.youtube.com/')):
-                        st.sidebar.error("Please enter a valid YouTube URL")
-                        return None
+                    ytt_api = YouTubeTranscriptApi()
+                    try:
+                        docs = ytt_api.fetch(video_id,languages=[video_language])
+                        # print(docs)
+                    except Exception as e:
+                        print("Transcript not found for this video .")
                     
-                    loader = YoutubeLoader.from_youtube_url(
-                        youtube_url,
-                        language=[video_language],
-                        translation="en",
-                        transcript_format=TranscriptFormat.CHUNKS,
-                        chunk_size_seconds=60,
-                    )
-                    docs = loader.load()
+                    # Step 1: Group snippets by minute
+                    minute_chunks = defaultdict(list)
+                    minute_starts = {}
+
+                    for snippet in docs:
+                        minute = int(snippet.start // 120)
+                        minute_chunks[minute].append(snippet.text)
+                        
+                        # Save the earliest start time per minute
+                        if minute not in minute_starts:
+                            minute_starts[minute] = snippet.start
+
+                    # Step 2: Create LangChain Document objects with HH:MM:SS timestamps
                     
-                    if len(docs) == 1:  # If only one chunk was returned
-                        text_splitter = RecursiveCharacterTextSplitter(
-                            chunk_size=1200,  # Adjust based on your needs
-                            chunk_overlap=120,
-                            length_function=len
-                        )
-                        docs = text_splitter.split_documents(docs)
 
-                    if docs:
-                        st.sidebar.success(f"Successfully loaded {len(docs)} transcript chunks")
-                    else:
-                        st.sidebar.warning("No transcript data was loaded (empty result)")
-                        return None
+                    for minute in sorted(minute_chunks.keys()):
+                        content = " ".join(minute_chunks[minute])
+                        
+                        # Format start time to HH:MM:SS
+                        seconds = int(minute_starts[minute])
+                        timestamp = str(timedelta(seconds=seconds))
 
-                except Exception as e:
-                    st.sidebar.error(f"Error loading YouTube transcript: {str(e)}")
-                    return None
+                        metadata = {
+                            "minute": minute,
+                            "start_timestamp": timestamp
+                        }
+                        
+                        doc = Document(page_content=content, metadata=metadata)
+                        documents.append(doc)
+
+                    print(documents)
+                    vectorstore.add_documents(documents)
+                    
             
-            if not docs:
-                st.sidebar.warning("No YouTube URL provided or loading failed - using default video")
-                try:
-                    loader = YoutubeLoader.from_youtube_url(
-                        "https://www.youtube.com/watch?v=J5_-l7WIO_w&list=PLKnIA16_RmvaTbihpo4MtzVm4XOQa0ER0&index=17",
-                        language=[video_language],
-                        translation="en",
-                        transcript_format=TranscriptFormat.CHUNKS,
-                        chunk_size_seconds=60,
-                    )
-                    docs = loader.load()
                 except Exception as e:
-                    # st.error(f"Failed to load default video: {str(e)}")
-                    st.error(f"Failed to load default video. Please re-check and enter the URL and the Video language")
+                    st.sidebar.info(f"Transcript for this Video doesnot exist . Try another YouTube URL .")
                     return None
-
-            vectorstore = Chroma.from_documents(
-                documents=docs, 
-                embedding=_embedding_model, 
-                persist_directory=persist_dir
-            )
-            return vectorstore
         
-    @st.cache_resource
+        return vectorstore
+
+        
+    # @st.cache_resource
     def create_retriever(_model,_vectorstore):
     
         metadata_field_info = [
         AttributeInfo(
-            name="source",
-            description="The link of the video",
-            type="string"
-        ),
-        AttributeInfo(
-            name="start_seconds",
-            description="The starting second of the video chunk (in seconds as integer)",
+            name="start_timestamp",
+            description="The starting second of the video chunk (in format of : 'HH:MM:SS)",
             type="integer"  # Changed from string to integer
         ),
         AttributeInfo(
-            name="start_timestamp",
-            description="Human-readable timestamp (HH:MM:SS format)",
+            name="minute",
+            description="Time of the video played",
             type="string"
         )]
         # First get the base retriever from your vectorstore with increased k
         base_vectorstore_retriever = _vectorstore.as_retriever(
-            # search_type = "mmr",
-            search_kwargs={"k": 10,'lambda_mult':0.5}  # Increase this number as needed
+            search_type = "mmr",
+            search_kwargs={"k": 4 , "lambda_mult":0.3} 
         )
         document_content_description = "Transcript of a youtube video"
         retriever = SelfQueryRetriever.from_llm(
@@ -163,7 +160,7 @@ def main():
             metadata_field_info,
             base_retriever = base_vectorstore_retriever,
             verbose=True,
-            search_kwargs={"k": 10}  # Increase this number as needed
+            # search_kwargs={"k": 8} 
         )
         return retriever
    
@@ -173,7 +170,7 @@ def main():
     vectorstore = get_vectorstore(embedding_model,youtube_url,video_language)
 
     if vectorstore is None:
-        st.error("Failed to initialize vector store. Please check the YouTube URL and try again.")
+        st.sidebar.info("Failed to initialize vector store. Please check the YouTube URL and try again.")
         return
     
     retriever = create_retriever(model,vectorstore)
@@ -181,13 +178,24 @@ def main():
     # Tool A. VectorStore Retriever tool (Convert the rag_chain into a tool)
     @tool
     def retrieve_vectorstore_tool(query: str) -> str:
-        """Use this tool without further thinking when the user ask about:
-    - content of the youtube video
-    - Any queries specifically about the youtube video 
-    - If the user query involves providing summary , or about specific time stamp ,generating blog etc
-    Input should be the exact search query.
-    The tool will perform a vectorstore search using retriever."""
-        return retriever.invoke(query)
+        """
+    Use this tool when the user asks about:
+    - Content of a YouTube video
+    - Any queries specifically about a YouTube video
+    - Requests for summaries, timestamps, blog generation, etc.
+    
+    Input should be the exact user query.
+    This tool performs a vectorstore search using a retriever and generates an answer using the provided LLM.
+    """
+        try:
+            result = retriever.invoke(query)
+            context = "\n\n".join([doc.page_content for doc in result])
+        
+        except Exception as e:
+            st.info("Error occured during retrieval . {e}")
+        
+        print(context)
+        return str(context)
 
     #DuckDuckSeach Tool
     @tool
@@ -198,7 +206,8 @@ def main():
     Input should be the exact search query.
     The tool will perform a web search using DuckDuckGo.
     """
-        return search.invoke(query)
+        result = search.invoke(query)
+        return str(result) 
 
 
     # --- Tools and bind the tools with llm ---
@@ -211,11 +220,11 @@ def main():
 
     #Function that decides which tool to use for serving the userquery
     def tool_calling_llm(state:State)->State:
-        print(state['messages'])
+        # print(state['messages'])
         selected_msg = trim_messages(
             state["messages"],
-            token_counter=len,  #len will count the number of messages rather than tokens
-            max_tokens=10,  # allow up to 10 messages.(i.e 2-3 past conversation between human and Ai)
+            token_counter=len,  
+            max_tokens=5,  
             strategy="last",        
             start_on="human",
             include_system=True,
@@ -246,7 +255,6 @@ def main():
         checkpointer=memory
     )
 
-
     # Initialize thread_id(unique id for each conversation) in session_state if not exists
     if "thread_id" not in st.session_state:
         st.session_state.thread_id = str(uuid.uuid4())
@@ -255,15 +263,33 @@ def main():
     
     if "messages" not in st.session_state:
         st.session_state.messages = [
-            {"role": "assistant", "content": "Hello! I'm your YouTube Assistant. Ask me content about the youtube video."}
-        ]
+    {
+        'role': 'assistant',
+        'content': """You are a helpful assistant with access to two tools:
 
+1. **retrieve_vectorstore_tool**: Use this when the user asks about the content of a YouTube video. This tool uses the video transcript to answer questions. Only use the transcript to generate responses.
+   - Summarize using bullet points or short paragraphs.
+   - If the user asks for a summary, provide a brief overview.
+   - If the answer is not in the transcript, say: "The transcript does not include that information."
+
+2. **duckducksearch_tool**: Use this for general queries like current news, events, or anything not related to the video.
+
+Only use a tool when needed. Keep responses accurate and easy to understand."""
+    }
+]
+
+        
     st.title("Youtube ChatAssistant")
 
     # display enitire chat messages
-    for message in st.session_state.messages:
+    # Display entire chat messages, excluding the first assistant (system-like) message
+    for i, message in enumerate(st.session_state.messages):
+        if i == 0 and message["role"] == "assistant":
+            continue  # Skip the first assistant message (system-level)
+        
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
+
 
     if prompt := st.chat_input("Your question"):
         # adding user message/query to chat history
