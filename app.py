@@ -18,13 +18,11 @@ from langchain_core.messages import HumanMessage, AIMessage
 from youtube_transcript_api import YouTubeTranscriptApi
 from langchain.chains.query_constructor.schema import AttributeInfo
 from langchain.retrievers.self_query.base import SelfQueryRetriever
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from collections import defaultdict
 from datetime import timedelta
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
 
 
 from dotenv import load_dotenv  #Load environemnt variables from .env
@@ -37,8 +35,9 @@ def main():
     @st.cache_resource
     def init_components():
         embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-mpnet-base-v2") #Load the hf Embedding model
-        llm = ChatGroq(temperature=0.4, model_name='Llama-3.3-70b-versatile',max_tokens=3000) #Initialize the llm
         # llm = ChatOpenAI(model='gpt-4o-mini')
+        llm = ChatGroq(temperature=0.4, model_name='Llama-3.3-70b-versatile',max_tokens=3000) #Initialize the llm
+
         search = DuckDuckGoSearchRun()  #Duckducksearch
         return embedding_model, llm, search
     
@@ -122,7 +121,7 @@ def main():
                         doc = Document(page_content=content, metadata=metadata)
                         documents.append(doc)
 
-                    print(documents)
+                    # print(documents)
                     vectorstore.add_documents(documents)
                     
             
@@ -194,7 +193,7 @@ def main():
         except Exception as e:
             st.info("Error occured during retrieval . {e}")
         
-        print(context)
+        # print(context)
         return str(context)
 
     #DuckDuckSeach Tool
@@ -202,9 +201,9 @@ def main():
     def duckducksearch_tool(query: str) -> str:
         """Use this tool Only when:
     - The question is about the current news, affairs etc.
+    - Input should be the exact search query.
+    - Output is the online search of User Query .
     
-    Input should be the exact search query.
-    The tool will perform a web search using DuckDuckGo.
     """
         result = search.invoke(query)
         return str(result) 
@@ -230,6 +229,8 @@ def main():
             include_system=True,
             allow_partial=False,
         )
+        print("------------------------------------------------")
+        print(selected_msg)
         return {"messages":[llm_with_tools.invoke(selected_msg)]}
 
     # Initialize the StateGraph
@@ -262,23 +263,21 @@ def main():
     config = {"configurable": {"thread_id": st.session_state.thread_id}}
     
     if "messages" not in st.session_state:
-        st.session_state.messages = [
-    {
+        st.session_state.messages = [{
         'role': 'assistant',
         'content': """You are a helpful assistant with access to two tools:
+1. **retrieve_vectorstore_tool**: 
+- Use the tool when the user asks about the content of a YouTube video.
+- This tool uses the video transcript to answer questions. 
+- Input to this tool should be the exact user query .
 
-1. **retrieve_vectorstore_tool**: Use this when the user asks about the content of a YouTube video. This tool uses the video transcript to answer questions. Only use the transcript to generate responses.
-   - Summarize using bullet points or short paragraphs.
-   - If the user asks for a summary, provide a brief overview.
-   - If the answer is not in the transcript, say: "The transcript does not include that information."
+2. **duckducksearch_tool**: 
+- Use the tool for general queries like current news, events, or anything not related to the video.
+- Input to this tool should be the exact user query .
 
-2. **duckducksearch_tool**: Use this for general queries like current news, events, or anything not related to the video.
-
-Only use a tool when needed. Keep responses accurate and easy to understand."""
+*** Note *** : Based on the result from the tool , answer the user question. """
     }
-]
-
-        
+]       
     st.title("Youtube ChatAssistant")
 
     # display enitire chat messages
