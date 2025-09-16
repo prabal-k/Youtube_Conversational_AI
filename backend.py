@@ -106,7 +106,7 @@ def process_youtube_video(youtube_url: str, language: str = "en"):
             {"name": "minute", "description": "Minute of video", "type": "integer"},
         ]
 
-        base_retriever = vectorstore.as_retriever(search_type="mmr", search_kwargs={"k": 8, "lambda_mult": 0.3})
+        base_retriever = vectorstore.as_retriever(search_type="mmr", search_kwargs={"k": 20, "lambda_mult": 0.3})
 
         document_content_description = "Transcript of a youtube video"
         retriever = SelfQueryRetriever.from_llm(
@@ -116,7 +116,7 @@ def process_youtube_video(youtube_url: str, language: str = "en"):
                     metadata_field_info,
                     base_retriever = base_retriever,
                     verbose=True,
-                    # search_kwargs={"k": 8} 
+                    search_kwargs={"k": 20} 
                 )
 
     except Exception as e:
@@ -177,9 +177,11 @@ class State(TypedDict):
     Attributes:
     messages : All the messages in our graph, including AIMessage, HumanMessage.
     audio_file : Path to generated audio file for the latest response.
+    generate_audio : Whether to generate audio for responses.
     """
     messages: Annotated[list[BaseMessage], add_messages] #List of messages appended
     audio_file: str = None  # Path to the generated audio file
+    generate_audio: bool = False  # Whether to generate audio
 
 def is_greeting_or_general(text: str) -> bool:
     """Check if the text is a general greeting, casual inquiry, or non-video related query."""
@@ -248,9 +250,10 @@ def route_query(state: State) -> dict:
     return {"decision": intent.decision}
 
 def handle_general_query(state: State) -> State:
-    """Handle general queries, greetings, and casual conversation with audio generation."""
+    """Handle general queries, greetings, and casual conversation with conditional audio generation."""
     
     messages = state["messages"]
+    generate_audio = state.get("generate_audio", False)
     user_msg = next(msg for msg in reversed(messages) if isinstance(msg, HumanMessage))
     
     # Prepare conversation history for context
@@ -285,13 +288,16 @@ Respond to the user's message in a natural, engaging way. Keep responses focused
     chain_general = template_general | llm
     response = chain_general.invoke({})
     
-    # Generate audio for the response
+    # Generate audio only if requested
     audio_file = None
-    try:
-        audio_file = generate_audio_files(response.content)
-        print(f"Generated audio for general query: {audio_file}")
-    except Exception as e:
-        print(f"Error generating audio for general query: {e}")
+    if generate_audio:
+        try:
+            audio_file = generate_audio_files(response.content)
+            print(f"Generated audio for general query: {audio_file}")
+        except Exception as e:
+            print(f"Error generating audio for general query: {e}")
+    else:
+        print("Audio generation skipped for general query (auto-play disabled)")
     
     return {
         "messages": messages + [response],
@@ -299,7 +305,7 @@ Respond to the user's message in a natural, engaging way. Keep responses focused
     }
 
 def handle_video_qa(state: State) -> State:
-    """Handle video analysis, summarization, and Q&A with audio generation."""
+    """Handle video analysis, summarization, and Q&A with conditional audio generation."""
 
     system_msg_video = """You're a helpful assistant that analyzes YouTube video transcripts and provides comprehensive answers.
 
@@ -322,6 +328,7 @@ Guidelines:
 
     # Get all messages (including history)
     messages = state["messages"]
+    generate_audio = state.get("generate_audio", False)
     
     # Get last human message
     user_msg = next(msg for msg in reversed(messages) if isinstance(msg, HumanMessage))
@@ -370,13 +377,16 @@ Guidelines:
         print(f"Error processing video query: {e}")
         response = AIMessage(content=f"I encountered an error while processing your video-related query: {str(e)}. Please make sure a video transcript has been properly loaded.")
     
-    # Generate audio for the response
+    # Generate audio only if requested
     audio_file = None
-    try:
-        audio_file = generate_audio_files(response.content)
-        print(f"Generated audio for video Q&A: {audio_file}")
-    except Exception as e:
-        print(f"Error generating audio for video Q&A: {e}")
+    if generate_audio:
+        try:
+            audio_file = generate_audio_files(response.content)
+            print(f"Generated audio for video Q&A: {audio_file}")
+        except Exception as e:
+            print(f"Error generating audio for video Q&A: {e}")
+    else:
+        print("Audio generation skipped for video Q&A (auto-play disabled)")
     
     return {
         "messages": messages + [response],
@@ -430,4 +440,4 @@ print("YouTube Video Analysis Workflow is ready!")
 print("\nThe workflow has two main capabilities:")
 print("1. General Query Handler - For greetings, casual conversation, and general questions")
 print("2. Video Q&A Handler - For video analysis, summarization, and content-based questions")
-print("3. Audio files are automatically generated for all LLM responses")
+print("3. Audio files are conditionally generated based on user preference")
